@@ -8,7 +8,7 @@ from datetime import datetime
 
 #should be in a .env but whatever
 REMOTE_USER = "ralph"  # The username to SSH as on worker nodes
-REMOTE_PROJECT_PATH = "/home/ralph/machine_project" # Project path on workers
+REMOTE_PROJECT_PATH = "/home/ralph/DISTRIBUTED_PROJECT" # Project path on workers
 REMOTE_PYTHON_EXEC = f"{REMOTE_PROJECT_PATH}/venv/bin/python" # Path to python WITHIN the virtualenv on workers
 # --- End Configuration ---
 
