@@ -126,58 +126,67 @@ class WorkerNode:
 
     def _consume_tasks(self, queue_name, callback_method):
         """Generic consumer loop for a given queue and callback."""
+        """Generic consumer loop with improved connection handling."""
         thread_name = threading.current_thread().name
         self.logger.info(f"{thread_name} starting...")
         
         while not self._stop_event.is_set():
             connection = None
             try:
-                connection = pika.BlockingConnection(
-                    pika.ConnectionParameters(
-                        host=self.rabbitmq_host,
-                        port=5672,
-                        credentials=self.credentials,
-                        heartbeat=60,
-                        blocked_connection_timeout=300
-                    )
+                # Add connection timeout to prevent hanging indefinitely
+                connection_params = pika.ConnectionParameters(
+                    host=self.rabbitmq_host,
+                    port=5672,
+                    credentials=self.credentials,
+                    heartbeat=60,
+                    blocked_connection_timeout=30,  # Reduced from 300
+                    connection_attempts=3,          # Limit connection attempts
+                    retry_delay=5                   # Wait between retries
                 )
+                
+                self.logger.info(f"{thread_name} attempting to connect to '{queue_name}'...")
+                connection = pika.BlockingConnection(connection_params)
                 channel = connection.channel()
                 channel.queue_declare(queue=queue_name, durable=True)
                 channel.basic_qos(prefetch_count=1)
                 self.logger.info(f"{thread_name} connected, consuming from '{queue_name}'.")
 
-                # Consume messages one by one with a timeout
-                for method_frame, properties, body in channel.consume(queue_name, inactivity_timeout=1):
+                # Use shorter timeout for consuming to be more responsive to stop events
+                for method_frame, properties, body in channel.consume(
+                    queue=queue_name, 
+                    inactivity_timeout=0.5  # More responsive to stop events
+                ):
                     if self._stop_event.is_set():
-                        break # Exit loop if stop event is set
-
-                    if method_frame: # Check if a message was received
-                        self.logger.debug(f"{thread_name} received task.")
+                        break
+                    
+                    if method_frame:
                         try:
                             callback_method(channel, method_frame, properties, body)
                         except Exception as e:
-                             self.logger.error(f"Error processing message in {thread_name}: {e}", exc_info=True)
-                             # Decide whether to Nack or Ack based on error (Nack with requeue=False is often safer)
-                             channel.basic_nack(delivery_tag=method_frame.delivery_tag, requeue=False)
-                    
-                    # If loop continues, connection is likely still healthy
-
-            except pika.exceptions.StreamLostError:
-                self.logger.warning(f"{thread_name} Stream lost. Reconnecting...")
-            except pika.exceptions.AMQPConnectionError:
-                self.logger.warning(f"{thread_name} Connection error. Reconnecting...")
-            except Exception as e:
-                self.logger.error(f"Unexpected error in {thread_name} consumer loop: {e}", exc_info=True)
-            finally:
-                if connection and connection.is_open:
-                    connection.close()
-                    self.logger.info(f"{thread_name} connection closed.")
+                            self.logger.error(f"Error processing message: {e}", exc_info=True)
+                            # Prevent requeuing problematic messages
+                            channel.basic_nack(delivery_tag=method_frame.delivery_tag, requeue=False)
             
-            # Wait before retrying connection if not stopping
-            if not self._stop_event.is_set():
-                 self.logger.info(f"{thread_name} waiting 5 seconds before retry...")
-                 time.sleep(5)
-                 
+            except pika.exceptions.AMQPConnectionError as e:
+                self.logger.warning(f"{thread_name} connection error: {e}")
+            except pika.exceptions.StreamLostError as e:
+                self.logger.warning(f"{thread_name} stream lost: {e}")
+            except Exception as e:
+                self.logger.error(f"Unexpected error in {thread_name}: {e}", exc_info=True)
+            finally:
+                # Ensure connection is properly closed
+                if connection and connection.is_open:
+                    try:
+                        connection.close()
+                    except Exception as e:
+                        self.logger.warning(f"Error closing connection: {e}")
+                
+                # Prevent CPU spinning with backoff if we can't connect
+                if not self._stop_event.is_set():
+                    retry_wait = 5  # Start with 5 seconds
+                    self.logger.info(f"{thread_name} waiting {retry_wait}s before retry...")
+                    time.sleep(retry_wait)
+        
         self.logger.info(f"{thread_name} stopped.")
 
 
