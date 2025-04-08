@@ -434,75 +434,66 @@ class WorkerNode:
             response.raise_for_status()
             soup = BeautifulSoup(response.text, 'html.parser')
             
-            # Find the main menu
-            # Find the colleges dropdown menu
             main_menu = soup.find('ul', class_='nav navbar-nav menu-main-menu') 
             if not main_menu:
                 raise ValueError("Main menu not found")
-            academics_li = main_menu.find_all('li', recursive=False)[2]  #Academics is the third option in the main menu
+            academics_li = main_menu.find_all('li', recursive=False)[2]
             if not academics_li or not academics_li.find('a', string='Academics'):
                 raise ValueError("Academics menu not found")
             academics_menu = academics_li.find('ul', recursive=False)
             if not academics_menu:
-                raise ValueError("Academics menu not found")
-            colleges_li = academics_menu.find_all('li', recursive=False)[0]  #Colleges is the first option in the academics menu
+                raise ValueError("Academics submenu not found")
+            colleges_li = academics_menu.find_all('li', recursive=False)[0]
             if not colleges_li or not colleges_li.find('a', string='Colleges'):
                 raise ValueError("Colleges menu not found")
             colleges_menu = colleges_li.find('ul', recursive=False)
             if not colleges_menu:
-                raise ValueError("Colleges menu not found")
+                raise ValueError("Colleges submenu not found")
             
-            # Process college and program links
             program_count = 0
             college_count = 0
-            college_programs = {}  # For tracking, as in original code
-            
+
             for college_li in colleges_menu.find_all('li', recursive=False):
                 college_link = college_li.find('a', recursive=False)
                 if not college_link:
                     continue
-                    
+                
                 college_name = college_link.text.strip()
                 self.logger.info(f"Processing College: {college_name}")
                 college_count += 1
                 self.send_status_update(job_id, "college")
                 
-                program_urls = []  # For tracking, as in original code
                 program_menu = college_li.find('ul', recursive=False)
-                
                 if program_menu:
                     for program_li in program_menu.find_all('li', recursive=False):
-                        program_url = program_li.find('a')['href']
-                        if program_url:
-                            program_name = program_li.find('a').text.strip()
-                            program_url = urllib.parse.urljoin(base_url, program_url)
-                            # Add tuple of college name and program URL to queue instead of storing
-                            # Publish task for this program page
+                        program_a = program_li.find('a')
+                        if not program_a or not program_a['href']:
+                            continue
+                        
+                        program_name = program_a.text.strip()
+                        program_url = urllib.parse.urljoin(base_url, program_a['href'])
 
-                            ch.basic_publish(
-                                exchange='',
-                                routing_key='program_tasks',
-                                body=json.dumps({
-                                    'job_id': job_id,
-                                    'task_type': 'process_program_page',
-                                    'college_name': college_name,
-                                    'program_name': program_name,
-                                    'program_url': program_url,
-                                    'base_url': base_url
-                                })
-                            )
-                           
-                            program_count += 1
-                            program_urls.append(program_url)
-                    college_programs[college_name] = program_urls
-            
-            total_urls = sum(len(programs) for programs in college_programs.values())
-            self.logger.info(f"Found {college_count} colleges and initiated {program_count} program page tasks ({total_urls} total URLs).")
-            
+                        ch.basic_publish(
+                            exchange='',
+                            routing_key='program_tasks',
+                            body=json.dumps({
+                                'job_id': job_id,
+                                'task_type': 'process_program_page',
+                                'college_name': college_name,
+                                'program_name': program_name,
+                                'program_url': program_url,
+                                'base_url': base_url
+                            })
+                        )
+                        program_count += 1
+
+            self.logger.info(f"Found {college_count} colleges and initiated {program_count} program page tasks.")
+
         except requests.RequestException as e:
             self.logger.error(f"HTTP Error getting college/program URLs from {base_url}: {e}")
         except Exception as e:
             self.logger.error(f"Error parsing college/program URLs: {e}", exc_info=True)
+
     def get_faculty_page(self, program_url, program_name, base_url):
         """Scrapes a program page to find the faculty directory link."""
         try:
@@ -510,39 +501,36 @@ class WorkerNode:
             response = requests.get(program_url, timeout=15)
             response.raise_for_status()
             soup = BeautifulSoup(response.text, 'html.parser')
-            
+
             faculty_links = soup.find_all('a', href=lambda href: href and 'faculty' in href.lower())
             if not faculty_links:
                 raise ValueError("No faculty links found!")
-            
+
             for link in faculty_links:
                 if 'faculty profile' in link.text.lower():
                     url = urllib.parse.urljoin(base_url, link['href'])
-                    
-                    # Remove the lock, but keep the same logic for tracking processed URLs
+
                     if url in self.processed_faculty_urls:
-                        # If we've seen this URL before but not for this program
                         if program_name not in self.processed_faculty_urls[url]:
                             self.processed_faculty_urls[url].add(program_name)
-                            return url  # Process it again for the new program
+                            return url
                         else:
                             self.logger.info(f"Skipping duplicate faculty URL for {program_name}: {url}")
                             return None
                     else:
-                        # First time seeing this URL
                         self.processed_faculty_urls[url] = {program_name}
                         return url
-            
-            # If we get here, no suitable links were found or all were already processed
+
             self.logger.warning(f"No suitable faculty links found for {program_name} on {program_url}")
             return None
-                
+
         except requests.RequestException as e:
             self.logger.error(f"HTTP Error getting faculty page {program_url}: {e}")
             return None
         except Exception as e:
             self.logger.error(f"Error parsing faculty page link in {program_url}: {e}", exc_info=True)
             return None
+
     
     def scrape_directory_page(self, url, college_name, program_name, base_url):
         """Scrapes the faculty directory page and returns ContactInfo objects."""
