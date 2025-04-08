@@ -199,9 +199,9 @@ class WorkerNode:
         profile_thread = threading.Thread(target=self._consume_tasks, args=('profile_tasks', self.process_profile_task), name="ProfileConsumer")
 
         threads = [program_thread, directory_thread, profile_thread]
-        health_thread = threading.Thread(target=self._health_check, name="HealthCheck")
-        health_thread.daemon = True  # This thread should not block program exit
-        threads.append(health_thread)
+        # health_thread = threading.Thread(target=self._health_check, name="HealthCheck")
+        # health_thread.daemon = True  # This thread should not block program exit
+        # threads.append(health_thread)
         for t in threads:
             t.start()
 
