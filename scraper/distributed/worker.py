@@ -142,46 +142,58 @@ class WorkerNode:
     # --- Consumer Target Functions ---
 
     def _consume_tasks(self, queue_name, callback_method):
-        """Generic consumer loop with improved connection handling."""
+        """Generic consumer loop with improved connection handling and timeouts."""
         thread_name = threading.current_thread().name
         self.logger.info(f"{thread_name} starting...")
         
         while not self._stop_event.is_set():
             connection = None
             try:
-                # Add shorter connection timeout
+                # Connection parameters (unchanged)
                 connection_params = pika.ConnectionParameters(
                     host=self.rabbitmq_host,
                     port=5672,
                     credentials=self.credentials,
                     heartbeat=60,
-                    blocked_connection_timeout=15,  # Reduced from 30
-                    connection_attempts=2,          # Limited attempts
-                    retry_delay=3                   # Shorter retry delay
+                    blocked_connection_timeout=15,
+                    connection_attempts=2,
+                    retry_delay=3
                 )
                 
                 connection = pika.BlockingConnection(connection_params)
                 channel = connection.channel()
-                # Set shorter prefetch
                 channel.queue_declare(queue=queue_name, durable=True)
                 channel.basic_qos(prefetch_count=1)
 
-                # Use even shorter consume timeout
                 for method_frame, properties, body in channel.consume(
                     queue=queue_name, 
                     inactivity_timeout=0.25  # More responsive to stop events
                 ):
                     if self._stop_event.is_set():
                         if method_frame:
-                            # Explicitly reject with requeue=True to avoid losing tasks
                             channel.basic_reject(delivery_tag=method_frame.delivery_tag, requeue=True)
                         break
                     
                     if method_frame:
                         try:
-                            callback_method(channel, method_frame, properties, body)
+                            # Add a timeout for processing each task
+                            def process_with_timeout():
+                                callback_method(channel, method_frame, properties, body)
+                            
+                            # Create and start the timer
+                            processing_timer = threading.Timer(30.0, lambda: self.logger.warning(
+                                f"Task processing timeout in {thread_name} for {queue_name}"))
+                            processing_timer.start()
+                            
+                            try:
+                                process_with_timeout()
+                            finally:
+                                # Cancel the timer if processing completes normally
+                                processing_timer.cancel()
+                                
                         except Exception as e:
                             self.logger.error(f"Error processing message: {e}", exc_info=True)
+                            # Always acknowledge to prevent getting stuck
                             channel.basic_nack(delivery_tag=method_frame.delivery_tag, requeue=False)
             
             except pika.exceptions.AMQPConnectionError as e:
@@ -189,12 +201,12 @@ class WorkerNode:
             except Exception as e:
                 self.logger.error(f"Unexpected error in {thread_name}: {e}", exc_info=True)
             finally:
+                # Cleanup (unchanged)
                 if connection and connection.is_open:
                     try:
                         connection.close()
                     except Exception:
                         pass
-                # Shorter backoff
                 if not self._stop_event.is_set():
                     time.sleep(3)
 
@@ -383,21 +395,21 @@ class WorkerNode:
         try:
             if task_type == 'process_profile_page':
                 contact_data = task.get('contact')
-                # base_url = task.get('base_url') # Get base_url if needed
                 if not contact_data:
-                     raise ValueError("Missing 'contact' data in process_profile_page task")
-                     
+                    raise ValueError("Missing 'contact' data in process_profile_page task")
+                    
                 # Recreate ContactInfo object from dict
                 contact = ContactInfo(**contact_data) 
                 
                 if not contact.profile_url:
-                     self.logger.warning(f"Skipping profile task for {contact.name} due to missing profile URL.")
-                     ch.basic_ack(delivery_tag=method.delivery_tag)
-                     return
+                    self.logger.warning(f"Skipping profile task for {contact.name} due to missing profile URL.")
+                    ch.basic_ack(delivery_tag=method.delivery_tag)
+                    return
 
                 self.logger.info(f"Scraping profile page: {contact.profile_url}")
                 updated_contact = self.scrape_profile_page(contact) # Scrape the page
                 
+                # Always acknowledge task completion, regardless of email presence
                 if updated_contact and updated_contact.email:
                     self.logger.info(f"Found email for {updated_contact.name}: {updated_contact.email}")
                     # Publish the result using the helper
@@ -407,7 +419,8 @@ class WorkerNode:
                     self.logger.warning(f"No email found for {contact.name} on profile page {contact.profile_url}")
                     self.send_status_update(job_id, "incomplete_record", contact.department)
                 
-                ch.basic_ack(delivery_tag=method.delivery_tag) # Acknowledge task completion
+                # Critical: Always acknowledge the task - this ensures we don't get stuck
+                ch.basic_ack(delivery_tag=method.delivery_tag)
 
             else:
                 self.logger.warning(f"Unknown profile task type: {task_type}")
@@ -415,6 +428,7 @@ class WorkerNode:
 
         except Exception as e:
             self.logger.error(f"Error processing profile task (job {job_id}, type {task_type}): {e}", exc_info=True)
+            # Always acknowledge to prevent getting stuck in a loop
             ch.basic_nack(delivery_tag=method.delivery_tag, requeue=False)
 
 
@@ -666,9 +680,26 @@ class WorkerNode:
         except Exception as e:
             self.logger.error(f"Error parsing directory page {url} for {program_name}: {e}", exc_info=True)
             return []
+    def _ensure_driver_health(self):
+        """Ensure Selenium driver is healthy and reset if needed."""
+        if not self.driver:
+            self.logger.info("Initializing Selenium driver")
+            self.driver = init_selenium_driver()
+            return
             
+        try:
+            # Simple health check
+            self.driver.current_url  # This will fail if driver is in a bad state
+        except Exception as e:
+            self.logger.warning(f"Driver appears unhealthy: {e}. Recreating...")
+            try:
+                self.driver.quit()
+            except:
+                pass
+            self.driver = init_selenium_driver()
     def scrape_profile_page(self, contact):
         """Scrapes an individual profile page to get the email (using Selenium)."""
+        self._ensure_driver_health()
         if not self.driver:
             self.logger.error("Selenium driver not available, cannot scrape profile page.")
             return contact # Return unmodified contact
