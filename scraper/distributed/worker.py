@@ -83,7 +83,7 @@ class WorkerNode:
                         )
                     )
                     self._status_channel = self._status_connection.channel()
-                    self._status_channel.queue_declare(queue='status_updates', durable=False)
+                    self._status_channel.queue_declare(queue='status_updates')
                 except Exception as e:
                     self.logger.error(f"Failed to create status connection: {e}")
                     self._status_connection = None
@@ -93,7 +93,7 @@ class WorkerNode:
             # Check if channel is valid
             if not self._status_channel or self._status_channel.is_closed:
                 try:
-                    self._status_channel.queue_declare(queue='status_updates', durable=False)
+                    self._status_channel.queue_declare(queue='status_updates')
 
                 except Exception as e:
                     self.logger.error(f"Failed to create status channel: {e}")
@@ -141,7 +141,7 @@ class WorkerNode:
                 
                 connection = pika.BlockingConnection(connection_params)
                 channel = connection.channel()
-                channel.queue_declare(queue=queue_name, durable=False)
+                channel.queue_declare(queue=queue_name)
                 channel.basic_qos(prefetch_count=1)
 
                 for method_frame, properties, body in channel.consume(
@@ -748,7 +748,7 @@ class WorkerNode:
                             )
                         )
                         channel = connection.channel()
-                        response = channel.queue_declare(queue=queue,durable=False, passive=False)
+                        response = channel.queue_declare(queue=queue, passive=False)
                         count = response.method.message_count
                         connection.close()
                         

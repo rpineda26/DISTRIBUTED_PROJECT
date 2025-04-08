@@ -30,13 +30,13 @@ class DistributedWebScraper:
     def setup_queues(self):
         """Set up all required RabbitMQ queues"""
         # Task queues
-        self.channel.queue_declare(queue='program_tasks', durable=False)
-        self.channel.queue_declare(queue='directory_tasks', durable=False)
-        self.channel.queue_declare(queue='profile_tasks', durable=False)
+        self.channel.queue_declare(queue='program_tasks')
+        self.channel.queue_declare(queue='directory_tasks')
+        self.channel.queue_declare(queue='profile_tasks')
         
         # Result queues
-        self.channel.queue_declare(queue='contact_results', durable=False)
-        self.channel.queue_declare(queue='status_updates', durable=False) 
+        self.channel.queue_declare(queue='contact_results')
+        self.channel.queue_declare(queue='status_updates') 
         
     def start(self):
         """Start the distributed scraping process"""
