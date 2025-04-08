@@ -53,10 +53,8 @@ class DistributedWebScraper:
                 'job_id': self.job_id,
                 'task_type': 'get_college_program_urls',
                 'base_url': self.base_url
-            }),
-            properties=pika.BasicProperties(
-                delivery_mode=2,  # make message persistent
-            )
+            })
+
         )
         
         # Monitor progress until completion or timeout
