@@ -53,41 +53,51 @@ class WorkerNode:
         self._stop_event = threading.Event()
 
     def _get_status_channel(self):
-        """Safely gets or creates the status channel."""
-        with self._status_lock:
-            try:
-                # Check if connection is valid
-                if not self._status_connection or self._status_connection.is_closed:
-                    self.logger.debug("Creating new status connection.")
+        """Safely gets or creates the status channel with timeout protection."""
+        if not self._status_lock.acquire(timeout=5):  # Add timeout to prevent deadlock
+            self.logger.warning("Could not acquire status lock after timeout")
+            return None
+            
+        try:
+            # Check if connection is valid
+            if not self._status_connection or self._status_connection.is_closed:
+                try:
+                    if self._status_connection:
+                        try:
+                            self._status_connection.close()
+                        except:
+                            pass
+                            
                     self._status_connection = pika.BlockingConnection(
                         pika.ConnectionParameters(
                             host=self.rabbitmq_host,
                             port=5672,
                             credentials=self.credentials,
-                            heartbeat=60, # Keep connection alive
-                            blocked_connection_timeout=300
+                            heartbeat=30,  # Reduced heartbeat
+                            blocked_connection_timeout=10  # Shorter timeout
                         )
                     )
                     self._status_channel = self._status_connection.channel()
                     self._status_channel.queue_declare(queue='status_updates', durable=True)
-                
-                # Check if channel is valid
-                if not self._status_channel or self._status_channel.is_closed:
-                     self.logger.debug("Recreating status channel.")
-                     self._status_channel = self._status_connection.channel()
-                     # Re-declare queue just in case
-                     self._status_channel.queue_declare(queue='status_updates', durable=True)
+                except Exception as e:
+                    self.logger.error(f"Failed to create status connection: {e}")
+                    self._status_connection = None
+                    self._status_channel = None
+                    return None
+            
+            # Check if channel is valid
+            if not self._status_channel or self._status_channel.is_closed:
+                try:
+                    self._status_channel = self._status_connection.channel()
+                    self._status_channel.queue_declare(queue='status_updates', durable=True)
+                except Exception as e:
+                    self.logger.error(f"Failed to create status channel: {e}")
+                    return None
 
-            except pika.exceptions.AMQPConnectionError as e:
-                 self.logger.error(f"Status Connection Error: {e}. Will retry later.")
-                 # Ensure cleanup happens
-                 if self._status_connection and self._status_connection.is_open:
-                      self._status_connection.close()
-                 self._status_connection = None
-                 self._status_channel = None
-                 return None # Indicate failure to get channel
-                 
             return self._status_channel
+                
+        finally:
+            self._status_lock.release()
 
     def _close_status_connection(self):
         """Closes the status connection if open."""
@@ -127,7 +137,6 @@ class WorkerNode:
     # --- Consumer Target Functions ---
 
     def _consume_tasks(self, queue_name, callback_method):
-        """Generic consumer loop for a given queue and callback."""
         """Generic consumer loop with improved connection handling."""
         thread_name = threading.current_thread().name
         self.logger.info(f"{thread_name} starting...")
@@ -135,30 +144,32 @@ class WorkerNode:
         while not self._stop_event.is_set():
             connection = None
             try:
-                # Add connection timeout to prevent hanging indefinitely
+                # Add shorter connection timeout
                 connection_params = pika.ConnectionParameters(
                     host=self.rabbitmq_host,
                     port=5672,
                     credentials=self.credentials,
                     heartbeat=60,
-                    blocked_connection_timeout=30,  # Reduced from 300
-                    connection_attempts=3,          # Limit connection attempts
-                    retry_delay=5                   # Wait between retries
+                    blocked_connection_timeout=15,  # Reduced from 30
+                    connection_attempts=2,          # Limited attempts
+                    retry_delay=3                   # Shorter retry delay
                 )
                 
-                self.logger.info(f"{thread_name} attempting to connect to '{queue_name}'...")
                 connection = pika.BlockingConnection(connection_params)
                 channel = connection.channel()
+                # Set shorter prefetch
                 channel.queue_declare(queue=queue_name, durable=True)
                 channel.basic_qos(prefetch_count=1)
-                self.logger.info(f"{thread_name} connected, consuming from '{queue_name}'.")
 
-                # Use shorter timeout for consuming to be more responsive to stop events
+                # Use even shorter consume timeout
                 for method_frame, properties, body in channel.consume(
                     queue=queue_name, 
-                    inactivity_timeout=0.5  # More responsive to stop events
+                    inactivity_timeout=0.25  # More responsive to stop events
                 ):
                     if self._stop_event.is_set():
+                        if method_frame:
+                            # Explicitly reject with requeue=True to avoid losing tasks
+                            channel.basic_reject(delivery_tag=method_frame.delivery_tag, requeue=True)
                         break
                     
                     if method_frame:
@@ -166,31 +177,21 @@ class WorkerNode:
                             callback_method(channel, method_frame, properties, body)
                         except Exception as e:
                             self.logger.error(f"Error processing message: {e}", exc_info=True)
-                            # Prevent requeuing problematic messages
                             channel.basic_nack(delivery_tag=method_frame.delivery_tag, requeue=False)
             
             except pika.exceptions.AMQPConnectionError as e:
                 self.logger.warning(f"{thread_name} connection error: {e}")
-            except pika.exceptions.StreamLostError as e:
-                self.logger.warning(f"{thread_name} stream lost: {e}")
             except Exception as e:
                 self.logger.error(f"Unexpected error in {thread_name}: {e}", exc_info=True)
             finally:
-                # Ensure connection is properly closed
                 if connection and connection.is_open:
                     try:
                         connection.close()
-                    except Exception as e:
-                        self.logger.warning(f"Error closing connection: {e}")
-                
-                # Prevent CPU spinning with backoff if we can't connect
+                    except Exception:
+                        pass
+                # Shorter backoff
                 if not self._stop_event.is_set():
-                    retry_wait = 5  # Start with 5 seconds
-                    self.logger.info(f"{thread_name} waiting {retry_wait}s before retry...")
-                    time.sleep(retry_wait)
-        
-        self.logger.info(f"{thread_name} stopped.")
-
+                    time.sleep(3)
 
     def start(self):
         """Start the worker node's consumer threads."""
@@ -202,38 +203,43 @@ class WorkerNode:
         profile_thread = threading.Thread(target=self._consume_tasks, args=('profile_tasks', self.process_profile_task), name="ProfileConsumer")
 
         threads = [program_thread, directory_thread, profile_thread]
-
+        health_thread = threading.Thread(target=self._health_check, name="HealthCheck")
+        health_thread.daemon = True  # This thread should not block program exit
+        health_thread.start()
+        threads.append(health_thread)
         for t in threads:
             t.start()
 
         # Keep main thread alive to handle termination signals
         try:
             while any(t.is_alive() for t in threads):
-                # Can add health checks or other monitoring here if needed
+                # Add health checks
+                for t in threads:
+                    if not t.is_alive():
+                        self.logger.warning(f"Thread {t.name} died unexpectedly")
                 time.sleep(1)
         except KeyboardInterrupt:
             self.logger.info("KeyboardInterrupt received, initiating shutdown...")
         finally:
-            self.logger.info("Signalling consumer threads to stop...")
-            self._stop_event.set() # Signal threads to stop consuming
-
-            self.logger.info("Waiting for consumer threads to finish...")
-            for t in threads:
-                t.join(timeout=10) # Wait for threads to finish cleanly
-                if t.is_alive():
-                     self.logger.warning(f"Thread {t.name} did not finish cleanly.")
-
-            self.logger.info("Cleaning up resources...")
-            self._close_status_connection() # Close the shared status connection
+            self._stop_event.set()
             
+            # Force-kill after timeout
+            end_time = time.time() + 15  # Wait max 15 seconds
+            while any(t.is_alive() for t in threads) and time.time() < end_time:
+                time.sleep(0.5)
+                
+            # Log threads that didn't shut down
+            for t in threads:
+                if t.is_alive():
+                    self.logger.warning(f"Thread {t.name} did not finish cleanly.")
+                    
+            # Force cleanup even if threads are stuck
+            self._close_status_connection()
             if self.driver:
                 try:
                     self.driver.quit()
-                    self.logger.info("Selenium driver quit.")
-                except Exception as e:
-                     self.logger.warning(f"Error quitting selenium driver: {e}")
-            
-            self.logger.info(f"Worker node {self.node_id} finished.")
+                except:
+                    pass
 
     # --- Task Processing Callbacks ---
 
@@ -632,17 +638,26 @@ class WorkerNode:
             return contact # Return unmodified contact
 
         try:
-            self.driver.set_page_load_timeout(30)
-            self.driver.get(contact.profile_url)
-            
-            # Don't use fixed sleep - it can cause hanging if the page doesn't load
-            # Instead use explicit wait with timeout
+            self.driver.set_page_load_timeout(15)  # Reduced from 30
+        
             try:
-                WebDriverWait(self.driver, 10).until(
+                self.driver.get(contact.profile_url)
+            except Exception as e:
+                self.logger.warning(f"Exception loading profile page {contact.profile_url}: {e}")
+                # Force refresh in case of timeout
+                try:
+                    self.driver.refresh()
+                except:
+                    pass
+                
+            # Shorter wait time
+            try:
+                WebDriverWait(self.driver, 5).until(  # Reduced from 10
                     lambda d: d.find_element(By.TAG_NAME, "body").is_displayed()
                 )
-            except:
+            except Exception:
                 self.logger.warning(f"Timeout waiting for body element on {contact.profile_url}")
+                
             
             # Get page source or text
             # Using page text is often more robust against obfuscation than inspecting source
@@ -688,7 +703,54 @@ class WorkerNode:
             self.logger.error(f"Error scraping profile page {contact.profile_url}: {e}", exc_info=True)
             return contact # Return contact potentially without email
 
-
+    def _health_check(self):
+        """Periodically check thread health and restart if needed."""
+        self.logger.info("Starting health check thread")
+        last_progress = {
+            'program_tasks': {'time': time.time(), 'count': 0},
+            'directory_tasks': {'time': time.time(), 'count': 0},
+            'profile_tasks': {'time': time.time(), 'count': 0}
+        }
+        
+        task_counters = {'program_tasks': 0, 'directory_tasks': 0, 'profile_tasks': 0}
+        
+        while not self._stop_event.is_set():
+            try:
+                # Check queue sizes
+                for queue in task_counters.keys():
+                    try:
+                        connection = pika.BlockingConnection(
+                            pika.ConnectionParameters(
+                                host=self.rabbitmq_host,
+                                credentials=self.credentials,
+                                blocked_connection_timeout=3
+                            )
+                        )
+                        channel = connection.channel()
+                        response = channel.queue_declare(queue=queue, passive=True)
+                        count = response.method.message_count
+                        connection.close()
+                        
+                        # Check if there's progress
+                        if count != last_progress[queue]['count']:
+                            last_progress[queue]['time'] = time.time()
+                            last_progress[queue]['count'] = count
+                            
+                    except Exception as e:
+                        self.logger.warning(f"Health check for {queue} failed: {e}")
+                    
+                # Check for stuck queues (no change in 5 minutes with pending tasks)
+                current_time = time.time()
+                for queue, data in last_progress.items():
+                    if data['count'] > 0 and current_time - data['time'] > 300:  # No progress for 5 minutes
+                        self.logger.warning(f"Queue {queue} appears stuck with {data['count']} messages")
+                        # Logic to reset connections or restart threads could go here
+                
+                time.sleep(30)  # Check every 30 seconds
+                
+            except Exception as e:
+                self.logger.error(f"Error in health check: {e}")
+                time.sleep(60)  # Wait longer after error
 # --- Main Execution ---
 
 def main():
