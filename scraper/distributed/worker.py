@@ -542,39 +542,27 @@ class WorkerNode:
             response.raise_for_status()
             soup = BeautifulSoup(response.text, 'html.parser')
             
-            # Look for links containing 'faculty' - make search more robust
-            faculty_links = soup.find_all('a', href=True, string=re.compile(r'faculty|staff|directory|profile', re.I))
+            faculty_links = soup.find_all('a', href=lambda href: href and 'faculty' in href.lower())
+            if not faculty_links:
+                raise ValueError("No faculty links found!")
             
-            potential_urls = set()
             for link in faculty_links:
-                 link_text = link.text.lower()
-                 href = link['href']
-                 # Prioritize links with specific keywords
-                 if 'faculty profile' in link_text or 'faculty directory' in link_text:
-                      url = urllib.parse.urljoin(base_url, href)
-                      potential_urls.add(url)
-                 # Consider other links containing 'faculty' if specific ones aren't found
-                 elif 'faculty' in link_text:
-                      url = urllib.parse.urljoin(base_url, href)
-                      potential_urls.add(url)
-
-            if not potential_urls:
-                self.logger.warning(f"No potential faculty links found for {program_name} on {program_url}")
-                return None
-
-            # Basic check against processed URLs (can be improved with distributed locking/cache if needed)
-            for url in potential_urls:
-                # Simple check: has this worker processed this URL *at all*?
-                # A more robust check might involve checking if processed for *this specific program* if URLs overlap
-                if url not in self.processed_faculty_urls:
-                    self.processed_faculty_urls[url] = {program_name} # Mark as processed for this program
-                    self.logger.info(f"Found faculty directory link for {program_name}: {url}")
-                    return url
-                elif program_name not in self.processed_faculty_urls.get(url, set()):
-                     # URL seen before, but not for this program - process it
-                     self.processed_faculty_urls.setdefault(url, set()).add(program_name)
-                     self.logger.info(f"Found faculty directory link (previously seen for other program) for {program_name}: {url}")
-                     return url
+                if 'faculty profile' in link.text.lower():
+                    url = urllib.parse.urljoin(self.scraper.base_url, link['href'])
+                    
+                    with self.scraper.faculty_url_lock:
+                        if url in self.scraper.processed_faculty_urls:
+                            # If we've seen this URL before but not for this program
+                            if program_name not in self.scraper.processed_faculty_urls[url]:
+                                self.scraper.processed_faculty_urls[url].add(program_name)
+                                return url  # Process it again for the new program
+                            else:
+                                self.scraper.logger.info(f"Skipping duplicate faculty URL for {program_name}: {url}")
+                                return None
+                        else:
+                            # First time seeing this URL
+                            self.scraper.processed_faculty_urls[url] = {program_name}
+                            return url
                  
             self.logger.warning(f"All potential faculty links for {program_name} seem to be processed already: {potential_urls}")
             return None # No suitable, unprocessed link found
@@ -680,6 +668,7 @@ class WorkerNode:
         except Exception as e:
             self.logger.error(f"Error parsing directory page {url} for {program_name}: {e}", exc_info=True)
             return []
+        
     def _ensure_driver_health(self):
         """Ensure Selenium driver is healthy and reset if needed."""
         if not self.driver:
