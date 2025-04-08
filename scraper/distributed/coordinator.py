@@ -45,19 +45,48 @@ class DistributedWebScraper:
         print(f"Number of nodes: {self.num_nodes}")
         print(f"Scrape time: {self.scrape_time_minutes} minutes")
         
-        # Create initial task to fetch program URLs
+        # Verify connection
+        if not self.connection.is_open:
+            print("Error: RabbitMQ connection is not open")
+            return
+            
+        # Verify queue exists
         try:
-            self.channel.basic_publish(
+            queue_info = self.channel.queue_declare(queue='program_tasks', passive=True)
+            print(f"Queue 'program_tasks' exists with {queue_info.method.message_count} messages")
+        except Exception as e:
+            print(f"Error checking queue: {e}")
+            print("Attempting to redeclare queue...")
+            self.channel.queue_declare(queue='program_tasks')  # Non-durable
+        
+        # Create initial task to fetch program URLs
+        initial_task = {
+            'job_id': self.job_id,
+            'task_type': 'get_college_program_urls',
+            'base_url': self.base_url
+        }
+        
+        print(f"Attempting to publish task: {initial_task}")
+        
+        try:
+            # Using basic_publish without delivery_mode=2 (non-persistent)
+            result = self.channel.basic_publish(
                 exchange='',
                 routing_key='program_tasks',
-                body=json.dumps({
-                    'job_id': self.job_id,
-                    'task_type': 'get_college_program_urls',
-                    'base_url': self.base_url
-                })
+                body=json.dumps(initial_task)
             )
+            
+            # Note: basic_publish in newer pika versions doesn't return a result
+            print("Message publication attempt completed")
+                
+            # Verify message was published by checking queue count
+            queue_info = self.channel.queue_declare(queue='program_tasks', passive=True)
+            print(f"Queue now has {queue_info.method.message_count} messages")
+            
         except Exception as e:
             print(f"Error publishing initial task: {e}")
+            import traceback
+            traceback.print_exc()
             return
             
         # Monitor progress until completion or timeout
