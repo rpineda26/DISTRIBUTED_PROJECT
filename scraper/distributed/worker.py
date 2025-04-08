@@ -15,6 +15,8 @@ from scraper.utils.data_models import ContactInfo
 from scraper.utils.logging_config import ColoredLogger, ColoredFormatter
 from scraper.utils.selenium_utils import init_selenium_driver
 from selenium.webdriver.common.by import By
+from selenium.webdriver.support.ui import WebDriverWait
+
 
 class WorkerNode:
     def __init__(self, node_id, rabbitmq_host='localhost'):
@@ -630,10 +632,17 @@ class WorkerNode:
             return contact # Return unmodified contact
 
         try:
-            self.logger.debug(f"Navigating to profile page: {contact.profile_url}")
+            self.driver.set_page_load_timeout(30)
             self.driver.get(contact.profile_url)
-            # Wait for dynamic content if necessary - adjust time as needed
-            time.sleep(2) # Simple wait, consider explicit waits for elements if page load is slow/dynamic
+            
+            # Don't use fixed sleep - it can cause hanging if the page doesn't load
+            # Instead use explicit wait with timeout
+            try:
+                WebDriverWait(self.driver, 10).until(
+                    lambda d: d.find_element(By.TAG_NAME, "body").is_displayed()
+                )
+            except:
+                self.logger.warning(f"Timeout waiting for body element on {contact.profile_url}")
             
             # Get page source or text
             # Using page text is often more robust against obfuscation than inspecting source
