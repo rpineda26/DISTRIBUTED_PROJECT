@@ -73,7 +73,10 @@ class DistributedWebScraper:
             result = self.channel.basic_publish(
                 exchange='',
                 routing_key='program_tasks',
-                body=json.dumps(initial_task)
+                body=json.dumps(initial_task),
+                properties=pika.BasicProperties(
+                    delivery_mode=2,  # make message non-persistent
+                )
             )
             
             # Note: basic_publish in newer pika versions doesn't return a result
