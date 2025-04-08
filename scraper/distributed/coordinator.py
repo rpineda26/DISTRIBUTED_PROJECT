@@ -46,7 +46,8 @@ class DistributedWebScraper:
         print(f"Scrape time: {self.scrape_time_minutes} minutes")
         
         # Create initial task to fetch program URLs
-        self.channel.basic_publish(
+        try:
+            self.channel.basic_publish(
             exchange='',
             routing_key='program_tasks',
             body=json.dumps({
@@ -55,13 +56,14 @@ class DistributedWebScraper:
                 'base_url': self.base_url
             })
 
-        )
+            )
         
-        # Monitor progress until completion or timeout
-        self.monitor_progress()
-        
-        # Cleanup
-        self.connection.close()
+        finally:
+            # Monitor progress until completion or timeout
+            self.monitor_progress()
+            
+            # Cleanup
+            self.connection.close()
         
     def monitor_progress(self):
         """Monitor the progress of the scraping job"""
