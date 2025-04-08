@@ -475,7 +475,7 @@ class WorkerNode:
                         program_url = program_li.find('a')['href']
                         if program_url:
                             program_name = program_li.find('a').text.strip()
-                            program_url = urllib.parse.urljoin(self.scraper.base_url, program_url)
+                            program_url = urllib.parse.urljoin(base_url, program_url)
                             # Add tuple of college name and program URL to queue instead of storing
                             # Publish task for this program page
 
@@ -517,27 +517,29 @@ class WorkerNode:
             
             for link in faculty_links:
                 if 'faculty profile' in link.text.lower():
-                    url = urllib.parse.urljoin(self.scraper.base_url, link['href'])
+                    url = urllib.parse.urljoin(base_url, link['href'])
                     
-                    with self.scraper.faculty_url_lock:
-                        if url in self.scraper.processed_faculty_urls:
-                            # If we've seen this URL before but not for this program
-                            if program_name not in self.scraper.processed_faculty_urls[url]:
-                                self.scraper.processed_faculty_urls[url].add(program_name)
-                                return url  # Process it again for the new program
-                            else:
-                                self.scraper.logger.info(f"Skipping duplicate faculty URL for {program_name}: {url}")
-                                return None
+                    # Remove the lock, but keep the same logic for tracking processed URLs
+                    if url in self.processed_faculty_urls:
+                        # If we've seen this URL before but not for this program
+                        if program_name not in self.processed_faculty_urls[url]:
+                            self.processed_faculty_urls[url].add(program_name)
+                            return url  # Process it again for the new program
                         else:
-                            # First time seeing this URL
-                            self.scraper.processed_faculty_urls[url] = {program_name}
-                            return url
-                 
-            return None # No suitable, unprocessed link found
+                            self.logger.info(f"Skipping duplicate faculty URL for {program_name}: {url}")
+                            return None
+                    else:
+                        # First time seeing this URL
+                        self.processed_faculty_urls[url] = {program_name}
+                        return url
             
+            # If we get here, no suitable links were found or all were already processed
+            self.logger.warning(f"No suitable faculty links found for {program_name} on {program_url}")
+            return None
+                
         except requests.RequestException as e:
-             self.logger.error(f"HTTP Error getting faculty page {program_url}: {e}")
-             return None
+            self.logger.error(f"HTTP Error getting faculty page {program_url}: {e}")
+            return None
         except Exception as e:
             self.logger.error(f"Error parsing faculty page link in {program_url}: {e}", exc_info=True)
             return None
