@@ -97,10 +97,10 @@ class DistributedWebScraper:
                 print(f"\rTime remaining: {remaining//60}m {remaining%60}s | "
                       f"Contacts found: {self.stats.total_emails_recorded}", end="")
                 
-                # Check queue stats to see if we're done
-                if self.are_queues_empty() and self.stats.total_emails_recorded > 0:
-                    print("\nAll queues empty and contacts found. Job complete!")
-                    break
+                # # Check queue stats to see if we're done
+                # if self.are_queues_empty() and self.stats.total_emails_recorded > 0:
+                #     print("\nAll queues empty and contacts found. Job complete!")
+                #     break
                     
                 time.sleep(1)
                 
