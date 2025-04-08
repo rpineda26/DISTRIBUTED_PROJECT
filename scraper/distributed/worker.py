@@ -443,47 +443,22 @@ class WorkerNode:
             soup = BeautifulSoup(response.text, 'html.parser')
             
             # Find the main menu
+            # Find the colleges dropdown menu
             main_menu = soup.find('ul', class_='nav navbar-nav menu-main-menu') 
             if not main_menu:
                 raise ValueError("Main menu not found")
-            
-            # Find the Academics menu item (third item in main menu)
-            academics_li_candidates = main_menu.find_all('li', recursive=False)
-            if len(academics_li_candidates) < 3:
-                raise ValueError("Not enough items in main menu for 'Academics'")
-            
-            # Try exact match first (as in old code)
-            academics_li = academics_li_candidates[2]
-            academics_link = academics_li.find('a', string='Academics')
-            # If not found with exact match, try more flexible matching
-            if not academics_link:
-                academics_link = academics_li.find('a', string=re.compile(r'Academics', re.I))
-                if not academics_link:
-                    raise ValueError("'Academics' link not found in expected position")
-            
-            # Find Academics submenu
+            academics_li = main_menu.find_all('li', recursive=False)[2]  #Academics is the third option in the main menu
+            if not academics_li or not academics_li.find('a', string='Academics'):
+                raise ValueError("Academics menu not found")
             academics_menu = academics_li.find('ul', recursive=False)
             if not academics_menu:
-                raise ValueError("Academics submenu not found")
-            
-            # Find Colleges menu item (first item in academics menu)
-            colleges_li_candidates = academics_menu.find_all('li', recursive=False)
-            if not colleges_li_candidates:
-                raise ValueError("No items found in Academics submenu")
-            
-            # Try exact match first (as in old code)
-            colleges_li = colleges_li_candidates[0]
-            colleges_link = colleges_li.find('a', string='Colleges')
-            # If not found with exact match, try more flexible matching
-            if not colleges_link:
-                colleges_link = colleges_li.find('a', string=re.compile(r'Colleges', re.I))
-                if not colleges_link:
-                    raise ValueError("'Colleges' link not found in expected position")
-            
-            # Find Colleges submenu
+                raise ValueError("Academics menu not found")
+            colleges_li = academics_menu.find_all('li', recursive=False)[0]  #Colleges is the first option in the academics menu
+            if not colleges_li or not colleges_li.find('a', string='Colleges'):
+                raise ValueError("Colleges menu not found")
             colleges_menu = colleges_li.find('ul', recursive=False)
             if not colleges_menu:
-                raise ValueError("Colleges submenu not found")
+                raise ValueError("Colleges menu not found")
             
             # Process college and program links
             program_count = 0
@@ -505,27 +480,23 @@ class WorkerNode:
                 
                 if program_menu:
                     for program_li in program_menu.find_all('li', recursive=False):
-                        program_link = program_li.find('a')
-                        if program_link and program_link.get('href'):
-                            program_url_relative = program_link['href']
-                            program_name = program_link.text.strip()
-                            program_url_absolute = urllib.parse.urljoin(base_url, program_url_relative)
-                            
-                            self.logger.debug(f"Found program: {program_name} -> {program_url_absolute}")
-                            program_urls.append(program_url_absolute)  # For tracking
-                            
+                        program_url = program_li.find('a')['href']
+                        if program_url:
+                            program_name = program_li.find('a').text.strip()
+                            program_url = urllib.parse.urljoin(self.scraper.base_url, program_url)
+                            # Add tuple of college name and program URL to queue instead of storing
                             # Publish task for this program page
                             self._publish_message('program_tasks', {
                                 'job_id': job_id,
                                 'task_type': 'process_program_page',
                                 'college_name': college_name,
                                 'program_name': program_name,
-                                'program_url': program_url_absolute,
+                                'program_url': program_url,
                                 'base_url': base_url
                             })
                             program_count += 1
-                    
-                    college_programs[college_name] = program_urls  # For tracking
+                            program_urls.append(program_url)
+                    college_programs[college_name] = program_urls
             
             total_urls = sum(len(programs) for programs in college_programs.values())
             self.logger.info(f"Found {college_count} colleges and initiated {program_count} program page tasks ({total_urls} total URLs).")
@@ -573,7 +544,7 @@ class WorkerNode:
         except Exception as e:
             self.logger.error(f"Error parsing faculty page link in {program_url}: {e}", exc_info=True)
             return None
-
+    
     def scrape_directory_page(self, url, college_name, program_name, base_url):
         """Scrapes the faculty directory page and returns ContactInfo objects."""
         contacts = []
@@ -585,8 +556,6 @@ class WorkerNode:
             
             processed_profile_urls_for_page = set() # Track profiles found on *this specific page load*
 
-            # Adapt selectors based on observed site structure (these might need adjustment)
-            # Try common patterns first
             # Pattern 1: Specific column class often used in WPBakery/Visual Composer
             faculty_elements = soup.find_all('div', class_=lambda c: c and 'vc_col-sm-4' in c and 'wpb_column' in c)
 
@@ -648,8 +617,7 @@ class WorkerNode:
                     # Mark as processed by this worker for this program
                     self.processed_faculty_urls.setdefault(absolute_profile_url, set()).add(program_name)
 
-                    contact = ContactInfo(
-                        name=full_name,
+                    contact = ContactInfo(                        name=full_name,
                         office=college_name,
                         department=program_name,
                         profile_url=absolute_profile_url
