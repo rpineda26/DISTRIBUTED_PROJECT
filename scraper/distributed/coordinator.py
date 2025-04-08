@@ -230,7 +230,7 @@ def main():
     
     args = parser.parse_args()
     credentials = pika.PlainCredentials('rabbituser1', 'rabbit1324')
-    clear_queues(args.rabbitmq_host, credentials)
+    # clear_queues(args.rabbitmq_host, credentials)
     # Create and start scraper
     scraper = DistributedWebScraper(args.url, args.time, args.nodes, args.rabbitmq_host)
     scraper.start()
