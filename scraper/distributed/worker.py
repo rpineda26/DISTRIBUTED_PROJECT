@@ -26,8 +26,13 @@ class WorkerNode:
         self.credentials = pika.PlainCredentials('rabbituser', 'rabbit1234') # Should be in environment
 
         # Set up logging
-        self.logger = logging.getLogger(f"WorkerNode-{self.node_id}")
+        self.logger = logging.getLogger(__name__)
         self.logger.setLevel(logging.INFO)
+        if not self.logger.hasHandlers():
+            handler = logging.StreamHandler()
+            handler.setFormatter(ColoredFormatter())
+            self.logger.addHandler(handler)
+
         # Prevent adding handlers multiple times if logger is reused
         if not self.logger.hasHandlers():
             handler = logging.StreamHandler()
@@ -421,42 +426,70 @@ class WorkerNode:
         try:
             self.logger.info(f"Scraping college/program URLs from {base_url}")
             response = requests.get(base_url, timeout=15)
-            response.raise_for_status() # Raise exception for bad status codes
+            response.raise_for_status()
             soup = BeautifulSoup(response.text, 'html.parser')
             
+            # Find the main menu
             main_menu = soup.find('ul', class_='nav navbar-nav menu-main-menu') 
-            if not main_menu: raise ValueError("Main menu ('nav navbar-nav menu-main-menu') not found")
+            if not main_menu:
+                raise ValueError("Main menu not found")
             
-            # Navigation logic might be fragile - adjust indices/selectors if site structure changes
+            # Find the Academics menu item (third item in main menu)
             academics_li_candidates = main_menu.find_all('li', recursive=False)
-            if len(academics_li_candidates) < 3: raise ValueError("Not enough items in main menu for 'Academics'")
-            academics_li = academics_li_candidates[2] 
-            if not academics_li.find('a', string=re.compile(r'Academics', re.I)): # Case-insensitive search
-                 raise ValueError("'Academics' link not found in expected position")
-
+            if len(academics_li_candidates) < 3:
+                raise ValueError("Not enough items in main menu for 'Academics'")
+            
+            # Try exact match first (as in old code)
+            academics_li = academics_li_candidates[2]
+            academics_link = academics_li.find('a', string='Academics')
+            # If not found with exact match, try more flexible matching
+            if not academics_link:
+                academics_link = academics_li.find('a', string=re.compile(r'Academics', re.I))
+                if not academics_link:
+                    raise ValueError("'Academics' link not found in expected position")
+            
+            # Find Academics submenu
             academics_menu = academics_li.find('ul', recursive=False)
-            if not academics_menu: raise ValueError("Academics submenu not found")
+            if not academics_menu:
+                raise ValueError("Academics submenu not found")
             
+            # Find Colleges menu item (first item in academics menu)
             colleges_li_candidates = academics_menu.find_all('li', recursive=False)
-            if not colleges_li_candidates: raise ValueError("No items found in Academics submenu for 'Colleges'")
-            colleges_li = colleges_li_candidates[0]
-            if not colleges_li.find('a', string=re.compile(r'Colleges', re.I)):
-                 raise ValueError("'Colleges' link not found in expected position")
-
-            colleges_menu = colleges_li.find('ul', recursive=False)
-            if not colleges_menu: raise ValueError("Colleges submenu not found")
+            if not colleges_li_candidates:
+                raise ValueError("No items found in Academics submenu")
             
+            # Try exact match first (as in old code)
+            colleges_li = colleges_li_candidates[0]
+            colleges_link = colleges_li.find('a', string='Colleges')
+            # If not found with exact match, try more flexible matching
+            if not colleges_link:
+                colleges_link = colleges_li.find('a', string=re.compile(r'Colleges', re.I))
+                if not colleges_link:
+                    raise ValueError("'Colleges' link not found in expected position")
+            
+            # Find Colleges submenu
+            colleges_menu = colleges_li.find('ul', recursive=False)
+            if not colleges_menu:
+                raise ValueError("Colleges submenu not found")
+            
+            # Process college and program links
             program_count = 0
             college_count = 0
+            college_programs = {}  # For tracking, as in original code
+            
             for college_li in colleges_menu.find_all('li', recursive=False):
                 college_link = college_li.find('a', recursive=False)
-                if not college_link: continue
+                if not college_link:
+                    continue
+                    
                 college_name = college_link.text.strip()
                 self.logger.info(f"Processing College: {college_name}")
                 college_count += 1
                 self.send_status_update(job_id, "college")
-
+                
+                program_urls = []  # For tracking, as in original code
                 program_menu = college_li.find('ul', recursive=False)
+                
                 if program_menu:
                     for program_li in program_menu.find_all('li', recursive=False):
                         program_link = program_li.find('a')
@@ -466,6 +499,8 @@ class WorkerNode:
                             program_url_absolute = urllib.parse.urljoin(base_url, program_url_relative)
                             
                             self.logger.debug(f"Found program: {program_name} -> {program_url_absolute}")
+                            program_urls.append(program_url_absolute)  # For tracking
+                            
                             # Publish task for this program page
                             self._publish_message('program_tasks', {
                                 'job_id': job_id,
@@ -476,14 +511,16 @@ class WorkerNode:
                                 'base_url': base_url
                             })
                             program_count += 1
-
-            self.logger.info(f"Found {college_count} colleges and initiated {program_count} program page tasks.")
+                    
+                    college_programs[college_name] = program_urls  # For tracking
+            
+            total_urls = sum(len(programs) for programs in college_programs.values())
+            self.logger.info(f"Found {college_count} colleges and initiated {program_count} program page tasks ({total_urls} total URLs).")
             
         except requests.RequestException as e:
-             self.logger.error(f"HTTP Error getting college/program URLs from {base_url}: {e}")
+            self.logger.error(f"HTTP Error getting college/program URLs from {base_url}: {e}")
         except Exception as e:
             self.logger.error(f"Error parsing college/program URLs: {e}", exc_info=True)
-
     def get_faculty_page(self, program_url, program_name, base_url):
         """Scrapes a program page to find the faculty directory link."""
         try:
@@ -761,7 +798,7 @@ def main():
     args = parser.parse_args()
     
     # Basic logging setup for the main script execution before worker starts
-    logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - [MainThread] - %(message)s')
+
     
     worker = WorkerNode(args.node_id, args.rabbitmq_host)
     worker.start() # This now blocks until interrupted or threads finish
