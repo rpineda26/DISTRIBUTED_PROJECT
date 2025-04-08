@@ -48,22 +48,23 @@ class DistributedWebScraper:
         # Create initial task to fetch program URLs
         try:
             self.channel.basic_publish(
-            exchange='',
-            routing_key='program_tasks',
-            body=json.dumps({
-                'job_id': self.job_id,
-                'task_type': 'get_college_program_urls',
-                'base_url': self.base_url
-            })
-
+                exchange='',
+                routing_key='program_tasks',
+                body=json.dumps({
+                    'job_id': self.job_id,
+                    'task_type': 'get_college_program_urls',
+                    'base_url': self.base_url
+                })
             )
-        
-        finally:
-            # Monitor progress until completion or timeout
-            self.monitor_progress()
+        except Exception as e:
+            print(f"Error publishing initial task: {e}")
+            return
             
-            # Cleanup
-            self.connection.close()
+        # Monitor progress until completion or timeout
+        self.monitor_progress()
+            
+        # Cleanup
+        self.connection.close()
         
     def monitor_progress(self):
         """Monitor the progress of the scraping job"""
@@ -229,8 +230,8 @@ def main():
     parser.add_argument('--rabbitmq-host', default='localhost', help='RabbitMQ host')
     
     args = parser.parse_args()
-    credentials = pika.PlainCredentials('rabbituser1', 'rabbit1324')
-    # clear_queues(args.rabbitmq_host, credentials)
+    credentials = pika.PlainCredentials('rabbituser1', 'rabbit1234')
+    clear_queues(args.rabbitmq_host, credentials)
     # Create and start scraper
     scraper = DistributedWebScraper(args.url, args.time, args.nodes, args.rabbitmq_host)
     scraper.start()
