@@ -748,7 +748,7 @@ class WorkerNode:
                             )
                         )
                         channel = connection.channel()
-                        response = channel.queue_declare(queue=queue, passive=True)
+                        response = channel.queue_declare(queue=queue,durable=False, passive=False)
                         count = response.method.message_count
                         connection.close()
                         
@@ -763,7 +763,7 @@ class WorkerNode:
                 # Check for stuck queues (no change in 5 minutes with pending tasks)
                 current_time = time.time()
                 for queue, data in last_progress.items():
-                    if data['count'] > 0 and current_time - data['time'] > 300:  # No progress for 5 minutes
+                    if data['count'] > 0 and current_time - data['time'] > 10:  # No progress for 5 minutes
                         self.logger.warning(f"Queue {queue} appears stuck with {data['count']} messages")
                         # Logic to reset connections or restart threads could go here
                 
