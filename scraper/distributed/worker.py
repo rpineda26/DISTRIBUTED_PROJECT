@@ -676,7 +676,7 @@ class WorkerNode:
             
             # Use regex to find emails (improved pattern)
             # Allows for domains with hyphens, common TLDs, and university .edu.xx extensions
-            email_pattern = r'[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}(?:\.[a-zA-Z]{2,})?'
+            email_pattern =r"[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}"
             emails = re.findall(email_pattern, page_text)
 
             found_email = None
