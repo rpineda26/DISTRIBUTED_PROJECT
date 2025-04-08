@@ -17,7 +17,7 @@ class DistributedWebScraper:
         self.end_time = datetime.now() + timedelta(minutes=scrape_time_minutes)
         
         # Set up RabbitMQ connection
-        self.credentials = pika.PlainCredentials('rabbituser', 'rabbit1234')
+        self.credentials = pika.PlainCredentials('rabbituser1', 'rabbit1234')
         self.connection = pika.BlockingConnection(pika.ConnectionParameters(host=rabbitmq_host, port=5672, credentials=self.credentials))
         self.channel = self.connection.channel()
         
@@ -30,13 +30,13 @@ class DistributedWebScraper:
     def setup_queues(self):
         """Set up all required RabbitMQ queues"""
         # Task queues
-        self.channel.queue_declare(queue='program_tasks', durable=True)
-        self.channel.queue_declare(queue='directory_tasks', durable=True)
-        self.channel.queue_declare(queue='profile_tasks', durable=True)
+        self.channel.queue_declare(queue='program_tasks', durable=False)
+        self.channel.queue_declare(queue='directory_tasks', durable=False)
+        self.channel.queue_declare(queue='profile_tasks', durable=False)
         
         # Result queues
-        self.channel.queue_declare(queue='contact_results', durable=True)
-        self.channel.queue_declare(queue='status_updates', durable=True) 
+        self.channel.queue_declare(queue='contact_results', durable=False)
+        self.channel.queue_declare(queue='status_updates', durable=False) 
         
     def start(self):
         """Start the distributed scraping process"""
@@ -202,6 +202,25 @@ class DistributedWebScraper:
         except Exception as e:
             print(f"Error saving statistics: {e}")
 
+
+def clear_queues(rabbitmq_host, credentials):
+    queues_to_clear = ['program_tasks', 'directory_tasks', 'profile_tasks', 'contact_results', 'status_updates']
+    conn = None
+    try:
+        conn = pika.BlockingConnection(pika.ConnectionParameters(host=rabbitmq_host, port=5672, credentials=credentials))
+        ch = conn.channel()
+        for q in queues_to_clear:
+            try:
+                ch.queue_delete(queue=q)
+                print(f"Deleted queue: {q}")
+            except Exception as e:
+                # Might fail if queue doesn't exist, which is fine
+                print(f"Could not delete queue {q} (may not exist): {e}")
+    except Exception as e:
+        print(f"Error connecting to RabbitMQ to clear queues: {e}")
+    finally:
+        if conn and conn.is_open:
+            conn.close()
 def main():
     parser = argparse.ArgumentParser(description='Distributed Web Scraper')
     parser.add_argument('url', help='Base URL to scrape')
@@ -210,7 +229,8 @@ def main():
     parser.add_argument('--rabbitmq-host', default='localhost', help='RabbitMQ host')
     
     args = parser.parse_args()
-
+    credentials = pika.PlainCredentials('rabbituser1', 'rabbit1324')
+    clear_queues(args.rabbitmq_host, credentials)
     # Create and start scraper
     scraper = DistributedWebScraper(args.url, args.time, args.nodes, args.rabbitmq_host)
     scraper.start()

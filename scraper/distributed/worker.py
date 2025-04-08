@@ -23,7 +23,7 @@ class WorkerNode:
         self.node_id = node_id
         self.rabbitmq_host = rabbitmq_host
         self.processed_faculty_urls = {} # Tracks URLs processed *by this worker*
-        self.credentials = pika.PlainCredentials('rabbituser', 'rabbit1234') # Should be in environment
+        self.credentials = pika.PlainCredentials('rabbituser1', 'rabbit1234') # Should be in environment
 
         # Set up logging
         self.logger = logging.getLogger(__name__)
@@ -83,7 +83,7 @@ class WorkerNode:
                         )
                     )
                     self._status_channel = self._status_connection.channel()
-                    self._status_channel.queue_declare(queue='status_updates', durable=True)
+                    self._status_channel.queue_declare(queue='status_updates', durable=False)
                 except Exception as e:
                     self.logger.error(f"Failed to create status connection: {e}")
                     self._status_connection = None
@@ -93,8 +93,8 @@ class WorkerNode:
             # Check if channel is valid
             if not self._status_channel or self._status_channel.is_closed:
                 try:
-                    self._status_channel = self._status_connection.channel()
-                    self._status_channel.queue_declare(queue='status_updates', durable=True)
+                    self._status_channel.queue_declare(queue='status_updates', durable=False)
+
                 except Exception as e:
                     self.logger.error(f"Failed to create status channel: {e}")
                     return None
@@ -116,28 +116,7 @@ class WorkerNode:
             self._status_connection = None
             self._status_channel = None
 
-    def _publish_message(self, queue_name, body_dict):
-        """Helper to publish a persistent message to a specified queue."""
-        conn = None
-        try:
-            # Create a short-lived connection just for publishing
-            conn = pika.BlockingConnection(pika.ConnectionParameters(host=self.rabbitmq_host, port=5672, credentials=self.credentials))
-            ch = conn.channel()
-            ch.queue_declare(queue=queue_name, durable=True) # Ensure queue exists
-            ch.basic_publish(
-                exchange='',
-                routing_key=queue_name,
-                body=json.dumps(body_dict),
-                properties=pika.BasicProperties(delivery_mode=pika.spec.PERSISTENT_DELIVERY_MODE)
-            )
-            self.logger.debug(f"Published message to {queue_name}: {body_dict.get('task_type', 'N/A')}")
-        except pika.exceptions.AMQPConnectionError as e:
-             self.logger.error(f"Connection Error publishing to {queue_name}: {e}", exc_info=True)
-        except Exception as e:
-            self.logger.error(f"Failed to publish message to {queue_name}: {e}", exc_info=True)
-        finally:
-            if conn and conn.is_open:
-                conn.close()
+    
 
     # --- Consumer Target Functions ---
 
@@ -162,7 +141,7 @@ class WorkerNode:
                 
                 connection = pika.BlockingConnection(connection_params)
                 channel = connection.channel()
-                channel.queue_declare(queue=queue_name, durable=True)
+                channel.queue_declare(queue=queue_name, durable=False)
                 channel.basic_qos(prefetch_count=1)
 
                 for method_frame, properties, body in channel.consume(
@@ -278,7 +257,7 @@ class WorkerNode:
                     routing_key='status_updates',
                     body=json.dumps(update),
                     properties=pika.BasicProperties(
-                        delivery_mode=pika.spec.PERSISTENT_DELIVERY_MODE
+                        delivery_mode=1
                     )
                 )
                 self.logger.debug(f"Sent status update: {stat_type} for {program_name or job_id}")
@@ -302,7 +281,7 @@ class WorkerNode:
                 if not base_url:
                      raise ValueError("Missing 'base_url' in get_college_program_urls task")
                 # This method now internally calls _publish_message for each program found
-                self.get_college_program_urls(base_url, job_id)
+                self.get_college_program_urls(ch, base_url, job_id)
                 ch.basic_ack(delivery_tag=method.delivery_tag) # Acknowledge task completion
 
             elif task_type == 'process_program_page':
@@ -318,14 +297,19 @@ class WorkerNode:
                 if faculty_url:
                     self.send_status_update(job_id, "faculty_url_success", program_name)
                     # Publish a new directory task using the helper
-                    self._publish_message('directory_tasks', {
-                        'job_id': job_id,
-                        'task_type': 'process_directory_page',
-                        'college_name': college_name,
-                        'program_name': program_name,
-                        'directory_url': faculty_url,
-                        'base_url': base_url
-                    })
+                    ch.basic_publish(
+                        exchange='',
+                        routing_key='directory_tasks',
+                        body=json.dumps({
+                            'job_id': job_id,
+                            'task_type': 'process_directory_page',
+                            'college_name': college_name,
+                            'program_name': program_name,
+                            'directory_url': faculty_url,
+                            'base_url': base_url
+                        })
+                    )
+
                 else:
                     self.send_status_update(job_id, "faculty_url_failure", program_name)
                     self.logger.warning(f"No faculty directory URL found for {program_name} at {program_url}")
@@ -365,12 +349,17 @@ class WorkerNode:
                     self.logger.info(f"Found {len(contacts)} potential contacts for {program_name}. Publishing profile tasks.")
                     for contact in contacts:
                          # Publish a new profile task for each contact using the helper
-                         self._publish_message('profile_tasks', {
-                             'job_id': job_id,
-                             'task_type': 'process_profile_page',
-                             'contact': contact.__dict__, # Send contact data
-                             'base_url': base_url # Pass base_url again if needed in profile scrape
-                         })
+                         ch.basic_publish(
+                                exchange='',
+                                routing_key='profile_tasks',
+                                body=json.dumps({
+                                    'job_id': job_id,
+                                    'task_type': 'process_profile_page',
+                                    'contact': contact.__dict__, # Send contact data
+                                    'base_url': base_url # Pass base_url again if needed in profile scrape
+                                })
+                         )
+    
                          self.send_status_update(job_id, "personnel_found", program_name)
                 else:
                      self.logger.warning(f"No contacts found or extracted for {program_name} from {directory_url}")
@@ -412,8 +401,11 @@ class WorkerNode:
                 # Always acknowledge task completion, regardless of email presence
                 if updated_contact and updated_contact.email:
                     self.logger.info(f"Found email for {updated_contact.name}: {updated_contact.email}")
-                    # Publish the result using the helper
-                    self._publish_message('contact_results', updated_contact.__dict__)
+                    ch.basic_publish(
+                        exchange='',
+                        routing_key='contact_results',
+                        body=json.dumps(updated_contact.__dict__)
+                    )
                     self.send_status_update(job_id, "complete_record", updated_contact.department)
                 else:
                     self.logger.warning(f"No email found for {contact.name} on profile page {contact.profile_url}")
@@ -434,7 +426,7 @@ class WorkerNode:
 
     # --- Scraping Logic Methods (Adapted from original, ensure they use self.logger) ---
 
-    def get_college_program_urls(self, base_url, job_id):
+    def get_college_program_urls(self, ch, base_url, job_id):
         """Scrapes the main navigation to get college and program URLs and publishes tasks."""
         try:
             self.logger.info(f"Scraping college/program URLs from {base_url}")
@@ -486,14 +478,20 @@ class WorkerNode:
                             program_url = urllib.parse.urljoin(self.scraper.base_url, program_url)
                             # Add tuple of college name and program URL to queue instead of storing
                             # Publish task for this program page
-                            self._publish_message('program_tasks', {
-                                'job_id': job_id,
-                                'task_type': 'process_program_page',
-                                'college_name': college_name,
-                                'program_name': program_name,
-                                'program_url': program_url,
-                                'base_url': base_url
-                            })
+
+                            ch.basic_publish(
+                                exchange='',
+                                routing_key='program_tasks',
+                                body=json.dumps({
+                                    'job_id': job_id,
+                                    'task_type': 'process_program_page',
+                                    'college_name': college_name,
+                                    'program_name': program_name,
+                                    'program_url': program_url,
+                                    'base_url': base_url
+                                })
+                            )
+                           
                             program_count += 1
                             program_urls.append(program_url)
                     college_programs[college_name] = program_urls
@@ -535,7 +533,6 @@ class WorkerNode:
                             self.scraper.processed_faculty_urls[url] = {program_name}
                             return url
                  
-            self.logger.warning(f"All potential faculty links for {program_name} seem to be processed already: {potential_urls}")
             return None # No suitable, unprocessed link found
             
         except requests.RequestException as e:
