@@ -196,7 +196,7 @@ class DistributedWebScraper:
             contact_data = json.loads(body)
             
             # Write to CSV
-            with open('contacts.csv', 'w', newline='') as csvfile:
+            with open('contacts.csv', 'a', newline='') as csvfile:
                 if csvfile.tell() == 0:
                     # Write header if file is empty
                     csvfile.write('email,name,office,department,profile_url\n')
